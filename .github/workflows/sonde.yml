@@ -1,0 +1,96 @@
+# Kadenas · la sonde extérieure (contrôle 10 du socle : https://kadenas.fr/socle/).
+#
+# Interroge chaque site opéré par Seiyar depuis l'extérieur de son serveur. La
+# liste vient de https://kadenas.fr/sites.json, générée depuis la liste des
+# sites opérés : une seule source, rien à recopier ici.
+#
+# Un site qui échoue deux fois, à 30 secondes d'écart, fait échouer le passage,
+# et GitHub prévient alors par e-mail. Une liste illisible compte comme un
+# échec : si kadenas.fr ne répond plus, le serveur ne répond sans doute plus
+# du tout.
+#
+# Lecture seule : aucun secret, aucune écriture, aucune action tierce.
+name: sonde
+
+on:
+  schedule:
+    # Toutes les 5 minutes, décalé de 2 minutes : GitHub retarde surtout les
+    # passages prévus pile à l'heure.
+    - cron: '2-59/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      essai:
+        description: "Une adresse https en plus, pour éprouver l'alerte (une page qui répond 404 fait échouer le passage)"
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sonde
+  cancel-in-progress: false
+
+jobs:
+  sonde:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Interroger les sites
+        env:
+          ESSAI: ${{ inputs.essai }}
+        run: |
+          set -uo pipefail
+          UA='Kadenas-Sonde/1.0 (monitor; +https://kadenas.fr/socle/)'
+
+          sonder() {
+            curl -sS -o /dev/null -L --max-redirs 3 --connect-timeout 10 --max-time 20 \
+                 -A "$UA" -w '%{http_code} %{time_total}' "$1" 2>/dev/null || true
+          }
+          lire_liste() { curl -fsS -L --max-time 20 -A "$UA" https://kadenas.fr/sites.json 2>/dev/null; }
+
+          # La liste des sites, en deux essais.
+          json=$(lire_liste) || { sleep 30; json=$(lire_liste); } || {
+            echo "::error title=kadenas.fr ne répond pas::liste des sites illisible deux fois de suite"
+            exit 1
+          }
+          mapfile -t sites < <(jq -r '.sites[]?' <<<"$json" | grep -E '^[a-z0-9.-]+\.[a-z]{2,}$')
+          if (( ${#sites[@]} == 0 )); then
+            echo "::error title=Liste vide::kadenas.fr/sites.json ne nomme aucun site"
+            exit 1
+          fi
+
+          urls=()
+          for d in "${sites[@]}"; do urls+=("https://$d/"); done
+          if [[ "${ESSAI:-}" =~ ^https://[A-Za-z0-9./_-]+$ ]]; then urls+=("$ESSAI"); fi
+
+          # Premier passage, puis un second 30 s plus tard pour ceux qui ont échoué.
+          declare -A res
+          ko=()
+          for u in "${urls[@]}"; do
+            r=$(sonder "$u"); res[$u]=${r:-000 -}
+            [[ ${res[$u]} == 2* ]] || ko+=("$u")
+          done
+          if (( ${#ko[@]} )); then
+            sleep 30
+            encore=()
+            for u in "${ko[@]}"; do
+              r=$(sonder "$u"); res[$u]=${r:-000 -}
+              [[ ${res[$u]} == 2* ]] || encore+=("$u")
+            done
+            ko=("${encore[@]}")
+          fi
+
+          {
+            echo "| site | code | durée (s) |"
+            echo "|---|---|---|"
+            for u in "${urls[@]}"; do set -- ${res[$u]}; echo "| $u | $1 | ${2:-} |"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+          for u in "${urls[@]}"; do echo "${res[$u]} $u"; done
+
+          if (( ${#ko[@]} )); then
+            for u in "${ko[@]}"; do
+              echo "::error title=Ne répond pas::$u (${res[$u]}), deux fois à 30 s d'écart"
+            done
+            exit 1
+          fi
