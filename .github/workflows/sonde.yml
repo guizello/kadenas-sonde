@@ -15,8 +15,9 @@ name: sonde
 on:
   schedule:
     # Toutes les 5 minutes, décalé de 2 minutes : GitHub retarde surtout les
-    # passages prévus pile à l'heure.
-    - cron: '2-59/5 * * * *'
+    # passages prévus pile à l'heure. Écrit en LISTE, la forme la plus simple :
+    # la forme « 2-59/5 » n'a déclenché aucun passage en 30 minutes le 26/11.
+    - cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
   workflow_dispatch:
     inputs:
       essai:
